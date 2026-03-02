@@ -10,11 +10,73 @@ AV.Cloud.define('hello', function (request) {
 /**
  * 获取微信 Access Token
  *
- * 这是你现有的云函数
+ * 用微信授权 code 换取 access_token 和 openid
+ *
+ * @param {Object} request
+ * @param {string} request.params.code - 微信授权 code
+ * @returns {Object} { openid, access_token, expires_in, nickname, headimgurl, sex, unionid }
  */
 AV.Cloud.define('getWeChatAccessToken', async (request) => {
-  // 你的现有实现
-  // ...
+  const code = request.params.code;
+
+  if (!code) {
+    throw new AV.Cloud.Error('缺少 code 参数', { code: 400 });
+  }
+
+  // 微信配置（从环境变量获取）
+  const appId = process.env.WECHAT_APP_ID || 'wx1c0feca38527b810';
+  const appSecret = process.env.WECHAT_APP_SECRET;
+
+  if (!appSecret) {
+    throw new AV.Cloud.Error('未配置 WECHAT_APP_SECRET', { code: 500 });
+  }
+
+  try {
+    // 1. 用 code 换取 access_token
+    const tokenUrl = `https://api.weixin.qq.com/sns/oauth2/access_token?appid=${appId}&secret=${appSecret}&code=${code}&grant_type=authorization_code`;
+
+    const tokenResponse = await fetch(tokenUrl);
+    const tokenData = await tokenResponse.json();
+
+    if (tokenData.errcode) {
+      console.error('获取 access_token 失败:', tokenData);
+      throw new AV.Cloud.Error(`微信API错误: ${tokenData.errmsg}`, { code: tokenData.errcode });
+    }
+
+    const { access_token, openid, expires_in, unionid } = tokenData;
+
+    // 2. 获取用户信息
+    const userInfoUrl = `https://api.weixin.qq.com/sns/userinfo?access_token=${access_token}&openid=${openid}`;
+
+    const userInfoResponse = await fetch(userInfoUrl);
+    const userInfo = await userInfoResponse.json();
+
+    if (userInfo.errcode) {
+      console.error('获取用户信息失败:', userInfo);
+      // 即使获取用户信息失败，也返回基本的 access_token 和 openid
+      return {
+        openid,
+        access_token,
+        expires_in,
+        unionid
+      };
+    }
+
+    // 3. 返回完整信息
+    return {
+      openid,
+      access_token,
+      expires_in,
+      unionid,
+      nickname: userInfo.nickname,
+      headimgurl: userInfo.headimgurl,
+      sex: userInfo.sex
+    };
+
+  } catch (error) {
+    console.error('getWeChatAccessToken 错误:', error);
+    throw new AV.Cloud.Error('获取微信授权信息失败', { code: 500 });
+  }
 });
 
 // ==================== 账号注销功能 ====================
