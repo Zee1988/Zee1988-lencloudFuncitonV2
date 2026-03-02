@@ -13,6 +13,9 @@ AV.Cloud.useMasterKey();
 
 const app = express();
 
+// 加载云引擎中间件（重要！）
+app.use(AV.express());
+
 // 加载云函数定义
 require('./cloud');
 
@@ -28,6 +31,9 @@ app.get('/', function (req, res) {
 const PORT = parseInt(process.env.LEANCLOUD_APP_PORT || process.env.PORT || 3000);
 app.listen(PORT, function () {
   console.log('Node app is running on port:', PORT);
+  console.log('环境变量检查:');
+  console.log('- WECHAT_APP_ID:', process.env.WECHAT_APP_ID ? '已配置' : '未配置');
+  console.log('- WECHAT_APP_SECRET:', process.env.WECHAT_APP_SECRET ? '已配置' : '未配置');
 });
 
 module.exports = app;
