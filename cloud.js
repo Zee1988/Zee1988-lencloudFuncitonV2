@@ -230,6 +230,27 @@ function formatDeletionResponse(task, message) {
   };
 }
 
+function isClassNotExistsError(error) {
+  if (!error) return false;
+  if (error.code === 101) return true;
+  const rawMessage = String(error.rawMessage || error.message || '').toLowerCase();
+  return rawMessage.includes("class or object doesn't exists");
+}
+
+async function findUserRelatedRecords(className, userPointer) {
+  try {
+    return await new AV.Query(className)
+      .equalTo('userId', userPointer)
+      .find({ useMasterKey: true });
+  } catch (error) {
+    if (isClassNotExistsError(error)) {
+      console.warn(`[executeDeletionTasks] 类 ${className} 不存在，跳过该类清理`);
+      return [];
+    }
+    throw error;
+  }
+}
+
 /**
  * 申请注销账号
  *
@@ -382,9 +403,7 @@ AV.Cloud.define('executeDeletionTasks', async (request) => {
       }
 
       // 1. 删除用户的学习数据（UserWord表）
-      const userWords = await new AV.Query('UserWord')
-        .equalTo('userId', userId)
-        .find({ useMasterKey: true });
+      const userWords = await findUserRelatedRecords('UserWord', userId);
 
       if (userWords.length > 0) {
         await AV.Object.destroyAll(userWords, { useMasterKey: true });
@@ -392,9 +411,7 @@ AV.Cloud.define('executeDeletionTasks', async (request) => {
       }
 
       // 2. 删除用户的订单数据（Order表）
-      const orders = await new AV.Query('Order')
-        .equalTo('userId', userId)
-        .find({ useMasterKey: true });
+      const orders = await findUserRelatedRecords('Order', userId);
 
       if (orders.length > 0) {
         await AV.Object.destroyAll(orders, { useMasterKey: true });
