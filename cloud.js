@@ -211,12 +211,31 @@ function getWeChatErrorMessage(errcode) {
 
 // ==================== 账号注销功能 ====================
 
+const ACCOUNT_DELETION_DAYS = 21;
+
+function formatDeletionResponse(task, message) {
+  const scheduledTimeDate = task.get('scheduledTime');
+  const scheduledTimeMs = scheduledTimeDate instanceof Date
+    ? scheduledTimeDate.getTime()
+    : null;
+
+  return {
+    success: true,
+    message,
+    taskId: task.id,
+    deletionTime: scheduledTimeDate || null,
+    scheduledTime: scheduledTimeMs,
+    // 用于提醒运维：真正执行删除依赖全局定时任务 executeDeletionTasks
+    requiresScheduler: true
+  };
+}
+
 /**
  * 申请注销账号
  *
  * @param {Object} request
  * @param {AV.User} request.currentUser - 当前登录用户
- * @returns {Object} { scheduledTime: 预计删除时间（毫秒时间戳） }
+ * @returns {Object} { success, message, taskId, deletionTime, scheduledTime, requiresScheduler }
  */
 AV.Cloud.define('deleteAccount', async (request) => {
   const currentUser = request.currentUser;
@@ -232,10 +251,11 @@ AV.Cloud.define('deleteAccount', async (request) => {
     .first({ useMasterKey: true });
 
   if (existingTask) {
-    // 如果已有申请，返回现有的预计删除时间
-    return {
-      scheduledTime: existingTask.get('scheduledTime').getTime()
-    };
+    console.log(`[deleteAccount] 用户 ${currentUser.id} 已有待处理任务: ${existingTask.id}`);
+    return formatDeletionResponse(
+      existingTask,
+      '您已提交过注销申请，无需重复提交'
+    );
   }
 
   // 创建新的删除任务
@@ -244,7 +264,7 @@ AV.Cloud.define('deleteAccount', async (request) => {
 
   const now = new Date();
   // 15个工作日后（按21天计算，包含周末）
-  const scheduledTime = new Date(now.getTime() + 21 * 24 * 60 * 60 * 1000);
+  const scheduledTime = new Date(now.getTime() + ACCOUNT_DELETION_DAYS * 24 * 60 * 60 * 1000);
 
   task.set('userId', currentUser);
   task.set('requestTime', now);
@@ -252,10 +272,14 @@ AV.Cloud.define('deleteAccount', async (request) => {
   task.set('status', 'pending');
 
   await task.save(null, { useMasterKey: true });
+  console.log(
+    `[deleteAccount] 创建 DeletionTask 成功, taskId=${task.id}, userId=${currentUser.id}, scheduledTime=${scheduledTime.toISOString()}`
+  );
 
-  return {
-    scheduledTime: scheduledTime.getTime()
-  };
+  return formatDeletionResponse(
+    task,
+    '账号注销申请已提交，等待定时任务执行删除'
+  );
 });
 
 /**
@@ -284,9 +308,15 @@ AV.Cloud.define('cancelAccountDeletion', async (request) => {
 
   // 更新状态为已取消
   task.set('status', 'cancelled');
+  task.set('cancelledTime', new Date());
   await task.save(null, { useMasterKey: true });
+  console.log(`[cancelAccountDeletion] 已取消任务 taskId=${task.id}, userId=${currentUser.id}`);
 
-  return { success: true };
+  return {
+    success: true,
+    message: '注销申请已取消',
+    taskId: task.id
+  };
 });
 
 /**
@@ -313,14 +343,16 @@ AV.Cloud.define('getAccountDeletionStatus', async (request) => {
     return {
       isPending: false,
       requestTime: null,
-      scheduledTime: null
+      scheduledTime: null,
+      taskId: null
     };
   }
 
   return {
     isPending: true,
     requestTime: task.get('requestTime').getTime(),
-    scheduledTime: task.get('scheduledTime').getTime()
+    scheduledTime: task.get('scheduledTime').getTime(),
+    taskId: task.id
   };
 });
 
@@ -345,6 +377,9 @@ AV.Cloud.define('executeDeletionTasks', async (request) => {
   for (const task of tasks) {
     try {
       const userId = task.get('userId');
+      if (!userId || !userId.id) {
+        throw new Error('DeletionTask 缺少有效 userId 指针');
+      }
 
       // 1. 删除用户的学习数据（UserWord表）
       const userWords = await new AV.Query('UserWord')
@@ -389,6 +424,7 @@ AV.Cloud.define('executeDeletionTasks', async (request) => {
 
       // 5. 更新任务状态为已完成
       task.set('status', 'completed');
+      task.set('completedTime', new Date());
       await task.save(null, { useMasterKey: true });
 
       results.push({
@@ -397,9 +433,16 @@ AV.Cloud.define('executeDeletionTasks', async (request) => {
       });
 
     } catch (error) {
-      console.error(`删除用户 ${task.get('userId').id} 失败:`, error);
+      const taskUser = task.get('userId');
+      const failedUserId = taskUser && taskUser.id ? taskUser.id : 'unknown';
+      task.set('status', 'failed');
+      task.set('failedTime', new Date());
+      task.set('error', error.message || String(error));
+      await task.save(null, { useMasterKey: true });
+
+      console.error(`删除用户 ${failedUserId} 失败:`, error);
       results.push({
-        userId: task.get('userId').id,
+        userId: failedUserId,
         success: false,
         error: error.message
       });

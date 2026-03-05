@@ -26,6 +26,15 @@ leancloud/
 ### 4. executeDeletionTasks
 执行账号删除（定时任务）
 
+## 关键说明（避免误判）
+
+- `deleteAccount` 不会在「云引擎 -> 定时任务」里按用户新增一条任务。
+- `deleteAccount` 的作用是写入一条 `DeletionTask` 数据记录（状态 `pending`）。
+- 真正执行删除依赖一个全局 Cron 任务：`executeDeletionTasks`。
+- 因此排查时要看两个地方：
+  - 「数据存储 -> 结构化数据 -> DeletionTask」是否有新记录；
+  - 「云引擎 -> 定时任务」是否已创建并启用 `executeDeletionTasks`。
+
 ## 部署步骤
 
 ### 方式一：通过 GitHub 部署（推荐）
@@ -72,6 +81,14 @@ leancloud/
 3. 函数名：executeDeletionTasks
 4. Cron 表达式：0 2 * * *
 5. 时区：Asia/Shanghai
+6. 状态：启用
+
+## 最小验证步骤
+
+1. 在「云引擎 -> 云函数」以某个测试用户身份运行 `deleteAccount`，应返回 `success: true` 和 `taskId/scheduledTime`。
+2. 打开「数据存储 -> 结构化数据 -> DeletionTask」，确认出现对应 `taskId` 且 `status = pending`。
+3. 在「云引擎 -> 定时任务」确认 `executeDeletionTasks` 的 Cron 任务存在且启用。
+4. 将某条 `DeletionTask.scheduledTime` 临时改成过去时间，手动运行 `executeDeletionTasks`，确认任务状态变为 `completed`（或失败时为 `failed` 并有 `error` 字段）。
 
 ## 测试
 
