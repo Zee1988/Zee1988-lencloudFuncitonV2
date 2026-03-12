@@ -472,4 +472,312 @@ AV.Cloud.define('executeDeletionTasks', async (request) => {
   };
 });
 
+// ==================== 支付功能 ====================
+
+const axios = require('axios');
+const crypto = require('crypto');
+
+// 云勾支付配置（从环境变量读取）
+const YUNGOU_MCH_ID = process.env.YUNGOU_MCH_ID || 'YOUR_YUNGOU_MCH_ID';
+const YUNGOU_API_KEY = process.env.YUNGOU_API_KEY || 'YOUR_YUNGOU_API_KEY';
+const PAYMENT_NOTIFY_URL = process.env.PAYMENT_NOTIFY_URL || 'https://your-app.leanapp.cn/api/payment/callback';
+const YUNGOU_ALIPAY_APP_PAY_URL = 'https://api.pay.yungouos.com/api/pay/alipay/appPay';
+
+// 价格配置（单位：分）
+const PRICE_MAP = {
+  monthly: 1200,    // ¥12/月
+  quarterly: 2900,  // ¥29/季
+  yearly: 9900      // ¥99/年
+};
+
+/**
+ * 创建支付订单
+ *
+ * @param {Object} request
+ * @param {string} request.params.productType - 产品类型（monthly/quarterly/yearly）
+ * @param {AV.User} request.currentUser - 当前登录用户
+ * @returns {Object} 订单信息和支付参数
+ */
+AV.Cloud.define('createOrder', async (request) => {
+  const { productType } = request.params;
+  const currentUser = request.currentUser;
+
+  // 1. 验证用户登录
+  if (!currentUser) {
+    throw new AV.Cloud.Error('请先登录', { code: 401 });
+  }
+
+  // 2. 验证产品类型
+  if (!productType || !PRICE_MAP[productType]) {
+    throw new AV.Cloud.Error('无效的产品类型', { code: 400 });
+  }
+
+  // 3. 检查配置
+  if (YUNGOU_MCH_ID === 'YOUR_YUNGOU_MCH_ID' || YUNGOU_API_KEY === 'YOUR_YUNGOU_API_KEY') {
+    throw new AV.Cloud.Error('支付功能尚未配置，请联系开发者', { code: 500 });
+  }
+
+  const amount = PRICE_MAP[productType];
+
+  // 4. 生成商户订单号（格式：VIP_用户ID_时间戳）
+  const outTradeNo = `VIP_${currentUser.id}_${Date.now()}`;
+
+  // 5. 调用云勾支付API创建订单（支付宝APP支付）
+  try {
+    const productName = productType === 'monthly' ? '月度会员' :
+                       productType === 'quarterly' ? '季度会员' : '年度会员';
+
+    console.log('[createOrder] 调用云勾支付宝API:', {
+      mch_id: YUNGOU_MCH_ID,
+      out_trade_no: outTradeNo,
+      total_fee: amount,
+      body: `英语学习VIP-${productName}`,
+      notify_url: PAYMENT_NOTIFY_URL
+    });
+
+    const response = await axios.post(YUNGOU_ALIPAY_APP_PAY_URL, {
+      mch_id: YUNGOU_MCH_ID,
+      out_trade_no: outTradeNo,
+      total_fee: amount,
+      body: `英语学习VIP-${productName}`,
+      notify_url: PAYMENT_NOTIFY_URL,
+      attach: JSON.stringify({
+        userId: currentUser.id,
+        productType: productType
+      }),
+      key: YUNGOU_API_KEY
+    });
+
+    console.log('[createOrder] 云勾支付宝API返回:', response.data);
+
+    if (response.data.code !== 0) {
+      throw new AV.Cloud.Error('创建订单失败：' + response.data.msg, { code: 500 });
+    }
+
+    const payData = response.data.data;
+
+    // 6. 保存订单到数据库
+    const Order = AV.Object.extend('Order');
+    const order = new Order();
+
+    order.set('orderId', payData.order_id);
+    order.set('userId', currentUser);
+    order.set('productType', productType);
+    order.set('amount', amount);
+    order.set('status', 'pending');
+    order.set('payMethod', 'alipay');  // 支付宝支付
+    order.set('outTradeNo', outTradeNo);
+
+    await order.save(null, { useMasterKey: true });
+
+    console.log('[createOrder] 订单保存成功:', order.id);
+
+    // 7. 返回支付参数（支付宝APP支付参数）
+    return {
+      orderId: order.id,
+      outTradeNo: outTradeNo,
+      orderInfo: payData.order_info  // 支付宝APP支付订单信息字符串
+    };
+
+  } catch (error) {
+    console.error('[createOrder] 创建订单失败:', error);
+
+    if (error.response) {
+      throw new AV.Cloud.Error('创建订单失败：' + (error.response.data?.msg || error.message), { code: 500 });
+    } else if (error instanceof AV.Cloud.Error) {
+      throw error;
+    } else {
+      throw new AV.Cloud.Error('创建订单失败：' + error.message, { code: 500 });
+    }
+  }
+});
+
+/**
+ * 查询订单状态
+ *
+ * @param {Object} request
+ * @param {string} request.params.orderId - 订单ID
+ * @param {AV.User} request.currentUser - 当前登录用户
+ * @returns {Object} 订单状态信息
+ */
+AV.Cloud.define('queryOrderStatus', async (request) => {
+  const { orderId } = request.params;
+  const currentUser = request.currentUser;
+
+  // 1. 验证用户登录
+  if (!currentUser) {
+    throw new AV.Cloud.Error('请先登录', { code: 401 });
+  }
+
+  // 2. 验证参数
+  if (!orderId) {
+    throw new AV.Cloud.Error('缺少订单ID', { code: 400 });
+  }
+
+  try {
+    // 3. 查询订单
+    const query = new AV.Query('Order');
+    const order = await query.get(orderId, { useMasterKey: true });
+
+    if (!order) {
+      throw new AV.Cloud.Error('订单不存在', { code: 404 });
+    }
+
+    // 4. 验证订单所属用户
+    const orderUser = order.get('userId');
+    if (orderUser.id !== currentUser.id) {
+      throw new AV.Cloud.Error('无权查询此订单', { code: 403 });
+    }
+
+    // 5. 返回订单状态
+    return {
+      orderId: order.id,
+      status: order.get('status'),
+      productType: order.get('productType'),
+      amount: order.get('amount'),
+      createdAt: order.get('createdAt').getTime(),
+      paidAt: order.get('paidAt') ? order.get('paidAt').getTime() : null
+    };
+
+  } catch (error) {
+    console.error('[queryOrderStatus] 查询订单失败:', error);
+
+    if (error instanceof AV.Cloud.Error) {
+      throw error;
+    } else {
+      throw new AV.Cloud.Error('查询订单失败：' + error.message, { code: 500 });
+    }
+  }
+});
+
+/**
+ * 计算签名（用于验证支付回调）
+ */
+function calculateSign(params, key) {
+  // 将参数按字典序排序
+  const sortedKeys = Object.keys(params).sort();
+  const signStr = sortedKeys
+    .filter(k => k !== 'sign' && params[k] !== '' && params[k] !== null && params[k] !== undefined)
+    .map(k => `${k}=${params[k]}`)
+    .join('&');
+
+  const fullStr = `${signStr}&key=${key}`;
+  return crypto.createHash('md5').update(fullStr).digest('hex').toUpperCase();
+}
+
+/**
+ * 支付回调处理（Express路由）
+ *
+ * 需要在 server.js 中注册此路由：
+ * app.post('/api/payment/callback', handlePaymentCallback);
+ */
+async function handlePaymentCallback(req, res) {
+  try {
+    console.log('[handlePaymentCallback] 收到支付回调:', req.body);
+
+    const {
+      out_trade_no,
+      transaction_id,
+      total_fee,
+      attach,
+      sign
+    } = req.body;
+
+    // 1. 验证签名
+    const calcSign = calculateSign({
+      out_trade_no,
+      transaction_id,
+      total_fee
+    }, YUNGOU_API_KEY);
+
+    if (sign !== calcSign) {
+      console.error('[handlePaymentCallback] 签名验证失败:', { sign, calcSign });
+      return res.send('FAIL');
+    }
+
+    console.log('[handlePaymentCallback] 签名验证成功');
+
+    // 2. 解析附加数据
+    let attachData;
+    try {
+      attachData = JSON.parse(attach);
+    } catch (e) {
+      console.error('[handlePaymentCallback] 解析attach失败:', e);
+      return res.send('FAIL');
+    }
+
+    const { userId, productType } = attachData;
+
+    // 3. 查询订单
+    const query = new AV.Query('Order');
+    query.equalTo('outTradeNo', out_trade_no);
+    const order = await query.first({ useMasterKey: true });
+
+    if (!order) {
+      console.error('[handlePaymentCallback] 订单不存在:', out_trade_no);
+      return res.send('FAIL');
+    }
+
+    // 4. 更新订单状态（幂等性处理）
+    const currentStatus = order.get('status');
+    if (currentStatus === 'paid') {
+      console.log('[handlePaymentCallback] 订单已支付，跳过处理');
+      return res.send('SUCCESS');
+    }
+
+    if (currentStatus === 'pending') {
+      order.set('status', 'paid');
+      order.set('transactionId', transaction_id);
+      order.set('paidAt', new Date());
+      await order.save(null, { useMasterKey: true });
+
+      console.log('[handlePaymentCallback] 订单状态更新为已支付:', order.id);
+
+      // 5. 开通VIP
+      const userQuery = new AV.Query('_User');
+      const user = await userQuery.get(userId, { useMasterKey: true });
+
+      if (user) {
+        user.set('vipType', productType);
+        user.set('vipPurchaseTime', new Date());
+
+        // 设置过期时间（根据产品类型）
+        const expireDate = new Date();
+        if (productType === 'monthly') {
+          expireDate.setDate(expireDate.getDate() + 30);  // 30天
+        } else if (productType === 'quarterly') {
+          expireDate.setDate(expireDate.getDate() + 90);  // 90天
+        } else if (productType === 'yearly') {
+          expireDate.setFullYear(expireDate.getFullYear() + 1);  // 365天
+        }
+        user.set('vipExpireTime', expireDate);
+
+        // 添加订单ID到用户的订单列表
+        const orderIds = user.get('vipOrderIds') || [];
+        orderIds.push(order.id);
+        user.set('vipOrderIds', orderIds);
+
+        await user.save(null, { useMasterKey: true });
+
+        console.log('[handlePaymentCallback] VIP开通成功:', {
+          userId: user.id,
+          vipType: productType,
+          expireTime: user.get('vipExpireTime')
+        });
+      } else {
+        console.error('[handlePaymentCallback] 用户不存在:', userId);
+      }
+    }
+
+    // 6. 返回SUCCESS
+    res.send('SUCCESS');
+
+  } catch (error) {
+    console.error('[handlePaymentCallback] 支付回调处理失败:', error);
+    res.send('FAIL');
+  }
+}
+
+// 导出支付回调处理函数
 module.exports = AV.Cloud;
+module.exports.handlePaymentCallback = handlePaymentCallback;

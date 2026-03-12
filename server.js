@@ -19,6 +19,10 @@ app.use(AV.express());
 // 加载云函数定义
 require('./cloud');
 
+// 注册支付回调路由
+const { handlePaymentCallback } = require('./cloud');
+app.post('/api/payment/callback', handlePaymentCallback);
+
 // 可以将一类的路由单独保存在一个文件中
 app.use('/todos', require('./routes/todos'));
 
@@ -34,6 +38,9 @@ app.listen(PORT, function () {
   console.log('环境变量检查:');
   console.log('- WECHAT_APP_ID:', process.env.WECHAT_APP_ID ? '已配置' : '未配置');
   console.log('- WECHAT_APP_SECRET:', process.env.WECHAT_APP_SECRET ? '已配置' : '未配置');
+  console.log('- YUNGOU_MCH_ID:', process.env.YUNGOU_MCH_ID ? '已配置' : '未配置');
+  console.log('- YUNGOU_API_KEY:', process.env.YUNGOU_API_KEY ? '已配置' : '未配置');
+  console.log('- PAYMENT_NOTIFY_URL:', process.env.PAYMENT_NOTIFY_URL ? '已配置' : '未配置');
 });
 
 module.exports = app;
