@@ -780,4 +780,242 @@ async function handlePaymentCallback(req, res) {
 
 // 导出支付回调处理函数
 module.exports = AV.Cloud;
+
+// ==================== VIP 管理云函数 ====================
+
+/**
+ * 修复终身 VIP 用户的数据
+ *
+ * 问题：部分终身 VIP 用户的 vipExpireTime 不是 null，导致被判断为非 VIP
+ * 解决：将所有 vipType = "lifetime" 的用户的 vipExpireTime 设置为 null
+ */
+AV.Cloud.define('fixLifetimeVipUsers', async (request) => {
+  try {
+    // 查询所有 vipType = "lifetime" 且 vipExpireTime 不为 null 的用户
+    const query = new AV.Query('_User');
+    query.equalTo('vipType', 'lifetime');
+    query.exists('vipExpireTime');  // vipExpireTime 存在（不为 null）
+
+    const users = await query.find({ useMasterKey: true });
+
+    console.log(`[fixLifetimeVipUsers] Found ${users.length} lifetime VIP users with expireTime set`);
+
+    if (users.length === 0) {
+      return {
+        success: true,
+        message: 'No users need to be fixed',
+        fixed: 0
+      };
+    }
+
+    // 修复每个用户
+    const fixedUsers = [];
+    const errors = [];
+
+    for (const user of users) {
+      try {
+        const userId = user.id;
+        const username = user.get('username') || user.get('mobilePhoneNumber') || 'unknown';
+        const oldExpireTime = user.get('vipExpireTime');
+
+        // 设置 vipExpireTime 为 null
+        user.unset('vipExpireTime');
+        await user.save(null, { useMasterKey: true });
+
+        fixedUsers.push({
+          userId,
+          username,
+          oldExpireTime: oldExpireTime ? oldExpireTime.toISOString() : null
+        });
+
+        console.log(`[fixLifetimeVipUsers] Fixed user: ${userId} (${username})`);
+      } catch (error) {
+        errors.push({
+          userId: user.id,
+          error: error.message
+        });
+        console.error(`[fixLifetimeVipUsers] Error fixing user ${user.id}:`, error);
+      }
+    }
+
+    return {
+      success: true,
+      message: `Fixed ${fixedUsers.length} users`,
+      fixed: fixedUsers.length,
+      errors: errors.length,
+      details: {
+        fixedUsers,
+        errors
+      }
+    };
+  } catch (error) {
+    console.error('[fixLifetimeVipUsers] Error:', error);
+    return {
+      success: false,
+      message: error.message,
+      fixed: 0
+    };
+  }
+});
+
+/**
+ * 查询所有终身 VIP 用户的状态
+ *
+ * 用于检查数据是否正确
+ */
+AV.Cloud.define('checkLifetimeVipUsers', async (request) => {
+  try {
+    const query = new AV.Query('_User');
+    query.equalTo('vipType', 'lifetime');
+    query.limit(1000);
+
+    const users = await query.find({ useMasterKey: true });
+
+    console.log(`[checkLifetimeVipUsers] Found ${users.length} lifetime VIP users`);
+
+    const result = users.map(user => ({
+      userId: user.id,
+      username: user.get('username') || user.get('mobilePhoneNumber') || 'unknown',
+      vipType: user.get('vipType'),
+      vipExpireTime: user.get('vipExpireTime') ? user.get('vipExpireTime').toISOString() : null,
+      vipPurchaseTime: user.get('vipPurchaseTime') ? user.get('vipPurchaseTime').toISOString() : null,
+      isCorrect: user.get('vipExpireTime') === undefined || user.get('vipExpireTime') === null
+    }));
+
+    const correctCount = result.filter(u => u.isCorrect).length;
+    const incorrectCount = result.filter(u => !u.isCorrect).length;
+
+    return {
+      success: true,
+      total: users.length,
+      correct: correctCount,
+      incorrect: incorrectCount,
+      users: result
+    };
+  } catch (error) {
+    console.error('[checkLifetimeVipUsers] Error:', error);
+    return {
+      success: false,
+      message: error.message
+    };
+  }
+});
+
+/**
+ * 设置用户为终身 VIP
+ *
+ * @param userId - 用户 ID
+ */
+AV.Cloud.define('setLifetimeVip', async (request) => {
+  const { userId } = request.params;
+
+  if (!userId) {
+    throw new AV.Cloud.Error('userId is required', { code: 40001 });
+  }
+
+  try {
+    const query = new AV.Query('_User');
+    const user = await query.get(userId, { useMasterKey: true });
+
+    if (!user) {
+      throw new AV.Cloud.Error(`User not found: ${userId}`, { code: 40002 });
+    }
+
+    const username = user.get('username') || user.get('mobilePhoneNumber') || 'unknown';
+
+    // 设置为终身 VIP
+    user.set('vipType', 'lifetime');
+    user.unset('vipExpireTime');  // 终身会员没有过期时间
+    user.set('vipPurchaseTime', new Date());
+
+    await user.save(null, { useMasterKey: true });
+
+    console.log(`[setLifetimeVip] Set user ${userId} (${username}) as lifetime VIP`);
+
+    return {
+      success: true,
+      message: `User ${username} is now a lifetime VIP`,
+      userId,
+      username,
+      vipType: 'lifetime',
+      vipExpireTime: null,
+      vipPurchaseTime: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error('[setLifetimeVip] Error:', error);
+    throw error;
+  }
+});
+
+/**
+ * 设置用户为限时 VIP
+ *
+ * @param userId - 用户 ID
+ * @param vipType - VIP 类型：monthly/quarterly/yearly
+ * @param days - 天数（可选，如果不提供则根据 vipType 自动计算）
+ */
+AV.Cloud.define('setTimeLimitedVip', async (request) => {
+  const { userId, vipType, days } = request.params;
+
+  if (!userId) {
+    throw new AV.Cloud.Error('userId is required', { code: 40001 });
+  }
+
+  if (!vipType || !['monthly', 'quarterly', 'yearly'].includes(vipType)) {
+    throw new AV.Cloud.Error('vipType must be one of: monthly, quarterly, yearly', { code: 40002 });
+  }
+
+  try {
+    const query = new AV.Query('_User');
+    const user = await query.get(userId, { useMasterKey: true });
+
+    if (!user) {
+      throw new AV.Cloud.Error(`User not found: ${userId}`, { code: 40003 });
+    }
+
+    const username = user.get('username') || user.get('mobilePhoneNumber') || 'unknown';
+
+    // 计算过期时间
+    let daysToAdd = days;
+    if (!daysToAdd) {
+      switch (vipType) {
+        case 'monthly':
+          daysToAdd = 30;
+          break;
+        case 'quarterly':
+          daysToAdd = 90;
+          break;
+        case 'yearly':
+          daysToAdd = 365;
+          break;
+      }
+    }
+
+    const now = new Date();
+    const expireTime = new Date(now.getTime() + daysToAdd * 24 * 60 * 60 * 1000);
+
+    // 设置为限时 VIP
+    user.set('vipType', vipType);
+    user.set('vipExpireTime', expireTime);
+    user.set('vipPurchaseTime', now);
+
+    await user.save(null, { useMasterKey: true });
+
+    console.log(`[setTimeLimitedVip] Set user ${userId} (${username}) as ${vipType} VIP until ${expireTime.toISOString()}`);
+
+    return {
+      success: true,
+      message: `User ${username} is now a ${vipType} VIP`,
+      userId,
+      username,
+      vipType,
+      vipExpireTime: expireTime.toISOString(),
+      vipPurchaseTime: now.toISOString(),
+      daysAdded: daysToAdd
+    };
+  } catch (error) {
+    console.error('[setTimeLimitedVip] Error:', error);
+    throw error;
+  }
+});
 module.exports.handlePaymentCallback = handlePaymentCallback;
