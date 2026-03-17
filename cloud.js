@@ -533,9 +533,14 @@ async function requestYungouAlipayAppPay(basePayload, apiKey) {
   data = await postForm(coreSignedPayload);
   if (data?.code === 0) return data;
 
-  // 尝试3：兼容旧接口口径（透传 key）
-  const legacyPayload = { ...basePayload, key: apiKey };
-  data = await postForm(legacyPayload);
+  // 两次签名都失败时，返回更有诊断价值的错误（优先第一次）
+  if (allSignedPayload && data?.msg && data.msg.includes('sign不能为空')) {
+    return {
+      ...data,
+      msg: `签名校验失败（已尝试两种签名口径）`
+    };
+  }
+
   return data;
 }
 
