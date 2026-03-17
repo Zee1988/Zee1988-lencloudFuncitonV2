@@ -480,6 +480,7 @@ const crypto = require('crypto');
 // 云勾支付配置（从环境变量读取）
 const YUNGOU_MCH_ID = process.env.YUNGOU_MCH_ID || 'YOUR_YUNGOU_MCH_ID';
 const YUNGOU_API_KEY = process.env.YUNGOU_API_KEY || 'YOUR_YUNGOU_API_KEY';
+const YUNGOU_ALIPAY_APP_ID = process.env.YUNGOU_ALIPAY_APP_ID || '';
 const PAYMENT_NOTIFY_URL = process.env.PAYMENT_NOTIFY_URL || 'https://your-app.leanapp.cn/api/payment/callback';
 const YUNGOU_ALIPAY_APP_PAY_URL = 'https://api.pay.yungouos.com/api/pay/alipay/appPay';
 
@@ -489,6 +490,13 @@ const PRICE_MAP = {
   quarterly: 2900,  // ¥29/季
   yearly: 9900      // ¥99/年
 };
+
+/**
+ * 金额从分转换成元字符串（两位小数）
+ */
+function centsToYuanString(cents) {
+  return (Number(cents) / 100).toFixed(2);
+}
 
 /**
  * 创建支付订单
@@ -518,6 +526,7 @@ AV.Cloud.define('createOrder', async (request) => {
   }
 
   const amount = PRICE_MAP[productType];
+  const totalFee = centsToYuanString(amount);
 
   // 4. 生成商户订单号（格式：VIP_用户ID_时间戳）
   const outTradeNo = `VIP_${currentUser.id}_${Date.now()}`;
@@ -526,27 +535,36 @@ AV.Cloud.define('createOrder', async (request) => {
   try {
     const productName = productType === 'monthly' ? '月度会员' :
                        productType === 'quarterly' ? '季度会员' : '年度会员';
+    const body = `英语学习VIP-${productName}`;
+    const attach = JSON.stringify({
+      userId: currentUser.id,
+      productType: productType
+    });
+
+    const requestPayload = {
+      mch_id: YUNGOU_MCH_ID,
+      out_trade_no: outTradeNo,
+      total_fee: totalFee,
+      body,
+      notify_url: PAYMENT_NOTIFY_URL,
+      attach
+    };
+
+    if (YUNGOU_ALIPAY_APP_ID) {
+      requestPayload.app_id = YUNGOU_ALIPAY_APP_ID;
+    }
+    requestPayload.sign = calculateSign(requestPayload, YUNGOU_API_KEY);
 
     console.log('[createOrder] 调用云勾支付宝API:', {
       mch_id: YUNGOU_MCH_ID,
       out_trade_no: outTradeNo,
-      total_fee: amount,
-      body: `英语学习VIP-${productName}`,
-      notify_url: PAYMENT_NOTIFY_URL
+      total_fee: totalFee,
+      body,
+      notify_url: PAYMENT_NOTIFY_URL,
+      app_id: YUNGOU_ALIPAY_APP_ID ? '已配置' : '未配置'
     });
 
-    const response = await axios.post(YUNGOU_ALIPAY_APP_PAY_URL, {
-      mch_id: YUNGOU_MCH_ID,
-      out_trade_no: outTradeNo,
-      total_fee: amount,
-      body: `英语学习VIP-${productName}`,
-      notify_url: PAYMENT_NOTIFY_URL,
-      attach: JSON.stringify({
-        userId: currentUser.id,
-        productType: productType
-      }),
-      key: YUNGOU_API_KEY
-    });
+    const response = await axios.post(YUNGOU_ALIPAY_APP_PAY_URL, requestPayload);
 
     console.log('[createOrder] 云勾支付宝API返回:', response.data);
 
@@ -554,13 +572,16 @@ AV.Cloud.define('createOrder', async (request) => {
       throw new AV.Cloud.Error('创建订单失败：' + response.data.msg, { code: 500 });
     }
 
-    const payData = response.data.data;
+    const orderInfo = response.data.data;
+    if (!orderInfo || typeof orderInfo !== 'string') {
+      throw new AV.Cloud.Error('创建订单失败：支付宝下单结果无效', { code: 500 });
+    }
 
     // 6. 保存订单到数据库
     const Order = AV.Object.extend('Order');
     const order = new Order();
 
-    order.set('orderId', payData.order_id);
+    order.set('orderId', outTradeNo);
     order.set('userId', currentUser);
     order.set('productType', productType);
     order.set('amount', amount);
@@ -576,7 +597,7 @@ AV.Cloud.define('createOrder', async (request) => {
     return {
       orderId: order.id,
       outTradeNo: outTradeNo,
-      orderInfo: payData.order_info  // 支付宝APP支付订单信息字符串
+      orderInfo: orderInfo  // 支付宝APP支付订单信息字符串
     };
 
   } catch (error) {
@@ -600,7 +621,7 @@ AV.Cloud.define('createOrder', async (request) => {
  * @param {AV.User} request.currentUser - 当前登录用户
  * @returns {Object} 订单状态信息
  */
-AV.Cloud.define('queryOrderStatus', async (request) => {
+async function handleQueryOrderStatus(request) {
   const { orderId } = request.params;
   const currentUser = request.currentUser;
 
@@ -648,7 +669,13 @@ AV.Cloud.define('queryOrderStatus', async (request) => {
       throw new AV.Cloud.Error('查询订单失败：' + error.message, { code: 500 });
     }
   }
-});
+}
+
+// 主查询接口
+AV.Cloud.define('queryOrderStatus', handleQueryOrderStatus);
+
+// 兼容旧客户端（旧客户端调用 queryOrder）
+AV.Cloud.define('queryOrder', handleQueryOrderStatus);
 
 /**
  * 计算签名（用于验证支付回调）
@@ -663,6 +690,18 @@ function calculateSign(params, key) {
 
   const fullStr = `${signStr}&key=${key}`;
   return crypto.createHash('md5').update(fullStr).digest('hex').toUpperCase();
+}
+
+/**
+ * 将回调金额转换为分
+ * 回调 total_fee 按元（字符串）传递
+ */
+function yuanToCents(yuan) {
+  const value = Number(yuan);
+  if (!Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  return Math.round(value * 100);
 }
 
 /**
@@ -683,12 +722,18 @@ async function handlePaymentCallback(req, res) {
       sign
     } = req.body;
 
+    if (!out_trade_no || !transaction_id || !total_fee || !sign) {
+      console.error('[handlePaymentCallback] 回调参数不完整:', {
+        out_trade_no,
+        transaction_id,
+        total_fee,
+        hasSign: !!sign
+      });
+      return res.send('FAIL');
+    }
+
     // 1. 验证签名
-    const calcSign = calculateSign({
-      out_trade_no,
-      transaction_id,
-      total_fee
-    }, YUNGOU_API_KEY);
+    const calcSign = calculateSign(req.body || {}, YUNGOU_API_KEY);
 
     if (sign !== calcSign) {
       console.error('[handlePaymentCallback] 签名验证失败:', { sign, calcSign });
@@ -698,15 +743,16 @@ async function handlePaymentCallback(req, res) {
     console.log('[handlePaymentCallback] 签名验证成功');
 
     // 2. 解析附加数据
-    let attachData;
+    let attachData = {};
     try {
-      attachData = JSON.parse(attach);
+      if (attach) {
+        attachData = JSON.parse(attach);
+      }
     } catch (e) {
-      console.error('[handlePaymentCallback] 解析attach失败:', e);
-      return res.send('FAIL');
+      console.error('[handlePaymentCallback] 解析attach失败，将尝试订单数据兜底:', e.message);
     }
 
-    const { userId, productType } = attachData;
+    let { userId, productType } = attachData;
 
     // 3. 查询订单
     const query = new AV.Query('Order');
@@ -718,11 +764,38 @@ async function handlePaymentCallback(req, res) {
       return res.send('FAIL');
     }
 
+    // 金额一致性校验（订单保存的是分，回调是元）
+    const callbackAmount = yuanToCents(total_fee);
+    const orderAmount = Number(order.get('amount'));
+    if (callbackAmount == null || callbackAmount !== orderAmount) {
+      console.error('[handlePaymentCallback] 金额校验失败:', {
+        outTradeNo: out_trade_no,
+        callbackAmount,
+        orderAmount,
+        rawTotalFee: total_fee
+      });
+      return res.send('FAIL');
+    }
+
     // 4. 更新订单状态（幂等性处理）
     const currentStatus = order.get('status');
     if (currentStatus === 'paid') {
       console.log('[handlePaymentCallback] 订单已支付，跳过处理');
       return res.send('SUCCESS');
+    }
+
+    // attach 缺失时，使用订单字段兜底
+    if (!productType) {
+      productType = order.get('productType');
+    }
+    if (!userId) {
+      const userPointer = order.get('userId');
+      userId = userPointer?.id || userPointer?.objectId;
+    }
+
+    if (!userId || !productType) {
+      console.error('[handlePaymentCallback] 无法确定用户或产品信息:', { userId, productType, out_trade_no });
+      return res.send('FAIL');
     }
 
     if (currentStatus === 'pending') {
@@ -754,8 +827,10 @@ async function handlePaymentCallback(req, res) {
 
         // 添加订单ID到用户的订单列表
         const orderIds = user.get('vipOrderIds') || [];
-        orderIds.push(order.id);
-        user.set('vipOrderIds', orderIds);
+        if (!orderIds.includes(order.id)) {
+          orderIds.push(order.id);
+          user.set('vipOrderIds', orderIds);
+        }
 
         await user.save(null, { useMasterKey: true });
 

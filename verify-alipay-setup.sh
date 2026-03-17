@@ -44,7 +44,7 @@ else
     exit 1
 fi
 
-if grep -q "orderInfo: payData.order_info" cloud.js; then
+if grep -q "orderInfo: orderInfo" cloud.js; then
     echo "✓ Return parameters include orderInfo"
 else
     echo "✗ Return parameters incorrect"
@@ -108,6 +108,7 @@ echo "Next steps:"
 echo "1. Configure environment variables in LeanCloud console:"
 echo "   - YUNGOU_MCH_ID"
 echo "   - YUNGOU_API_KEY"
+echo "   - YUNGOU_ALIPAY_APP_ID (optional, required for multi-app scenarios)"
 echo "   - PAYMENT_NOTIFY_URL"
 echo ""
 echo "2. Deploy to LeanCloud:"
