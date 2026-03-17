@@ -564,7 +564,12 @@ AV.Cloud.define('createOrder', async (request) => {
       app_id: YUNGOU_ALIPAY_APP_ID ? '已配置' : '未配置'
     });
 
-    const response = await axios.post(YUNGOU_ALIPAY_APP_PAY_URL, requestPayload);
+    const formPayload = new URLSearchParams(requestPayload).toString();
+    const response = await axios.post(YUNGOU_ALIPAY_APP_PAY_URL, formPayload, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    });
 
     console.log('[createOrder] 云勾支付宝API返回:', response.data);
 
