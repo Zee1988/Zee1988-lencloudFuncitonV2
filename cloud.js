@@ -495,7 +495,48 @@ const PRICE_MAP = {
  * 金额从分转换成元字符串（两位小数）
  */
 function centsToYuanString(cents) {
-  return (Number(cents) / 100).toFixed(2);
+  const value = Number(cents) / 100;
+  // 云勾在部分场景会按无尾零格式校验签名，统一去尾零
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, '');
+}
+
+/**
+ * 调用云勾支付宝下单（兼容签名口径差异）
+ */
+async function requestYungouAlipayAppPay(basePayload, apiKey) {
+  const postForm = async (payload) => {
+    const formPayload = new URLSearchParams(payload).toString();
+    const response = await axios.post(YUNGOU_ALIPAY_APP_PAY_URL, formPayload, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    });
+    return response.data;
+  };
+
+  // 尝试1：按全部参数签名
+  const allSignedPayload = { ...basePayload, sign: calculateSign(basePayload, apiKey) };
+  let data = await postForm(allSignedPayload);
+  if (data?.code === 0) return data;
+
+  // 尝试2：按核心参数签名（mch_id/out_trade_no/total_fee/body/app_id）
+  const coreForSign = {
+    mch_id: basePayload.mch_id,
+    out_trade_no: basePayload.out_trade_no,
+    total_fee: basePayload.total_fee,
+    body: basePayload.body
+  };
+  if (basePayload.app_id) {
+    coreForSign.app_id = basePayload.app_id;
+  }
+  const coreSignedPayload = { ...basePayload, sign: calculateSign(coreForSign, apiKey) };
+  data = await postForm(coreSignedPayload);
+  if (data?.code === 0) return data;
+
+  // 尝试3：兼容旧接口口径（透传 key）
+  const legacyPayload = { ...basePayload, key: apiKey };
+  data = await postForm(legacyPayload);
+  return data;
 }
 
 /**
@@ -553,7 +594,6 @@ AV.Cloud.define('createOrder', async (request) => {
     if (YUNGOU_ALIPAY_APP_ID) {
       requestPayload.app_id = YUNGOU_ALIPAY_APP_ID;
     }
-    requestPayload.sign = calculateSign(requestPayload, YUNGOU_API_KEY);
 
     console.log('[createOrder] 调用云勾支付宝API:', {
       mch_id: YUNGOU_MCH_ID,
@@ -564,20 +604,14 @@ AV.Cloud.define('createOrder', async (request) => {
       app_id: YUNGOU_ALIPAY_APP_ID ? '已配置' : '未配置'
     });
 
-    const formPayload = new URLSearchParams(requestPayload).toString();
-    const response = await axios.post(YUNGOU_ALIPAY_APP_PAY_URL, formPayload, {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      }
-    });
+    const responseData = await requestYungouAlipayAppPay(requestPayload, YUNGOU_API_KEY);
+    console.log('[createOrder] 云勾支付宝API返回:', responseData);
 
-    console.log('[createOrder] 云勾支付宝API返回:', response.data);
-
-    if (response.data.code !== 0) {
-      throw new AV.Cloud.Error('创建订单失败：' + response.data.msg, { code: 500 });
+    if (responseData.code !== 0) {
+      throw new AV.Cloud.Error('创建订单失败：' + responseData.msg, { code: 500 });
     }
 
-    const orderInfo = response.data.data;
+    const orderInfo = responseData.data;
     if (!orderInfo || typeof orderInfo !== 'string') {
       throw new AV.Cloud.Error('创建订单失败：支付宝下单结果无效', { code: 500 });
     }
