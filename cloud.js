@@ -889,13 +889,20 @@ async function handlePaymentCallback(req, res) {
   try {
     console.log('[handlePaymentCallback] 收到支付回调:', req.body);
 
+    // 云勾实际回调字段：outTradeNo, payNo, money, code, sign, attach, orderNo, mchId, openId, payChannel, payBank, time
     const {
-      out_trade_no,
-      transaction_id,
-      total_fee,
+      outTradeNo,
+      payNo,
+      money,
       attach,
-      sign
+      sign,
+      code
     } = req.body;
+
+    // 兼容映射（云勾字段 -> 业务字段）
+    const out_trade_no = outTradeNo;
+    const transaction_id = payNo;
+    const total_fee = money;
 
     if (!out_trade_no || !transaction_id || !total_fee || !sign) {
       console.error('[handlePaymentCallback] 回调参数不完整:', {
@@ -907,7 +914,13 @@ async function handlePaymentCallback(req, res) {
       return res.send('FAIL');
     }
 
-    // 1. 验证签名
+    // 云勾 code=1 表示支付成功
+    if (code !== '1' && code !== 1) {
+      console.log('[handlePaymentCallback] 支付未成功, code:', code);
+      return res.send('SUCCESS');
+    }
+
+    // 1. 验证签名（用云勾原始字段名计算）
     const calcSign = calculateSign(req.body || {}, YUNGOU_API_KEY);
 
     if (sign !== calcSign) {
