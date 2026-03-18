@@ -486,6 +486,7 @@ const YUNGOU_ALIPAY_APP_PAY_URL = 'https://api.pay.yungouos.com/api/pay/alipay/a
 
 // 价格配置（单位：分）
 const PRICE_MAP = {
+  test: 1,          // ¥0.01 调试用
   monthly: 1200,    // ¥12/月
   quarterly: 2900,  // ¥29/季
   yearly: 9900      // ¥99/年
