@@ -659,8 +659,92 @@ AV.Cloud.define('createOrder', async (request) => {
 });
 
 /**
- * 查询订单状态
- *
+ * 客户端主动确认支付（不依赖云勾回调）
+ * 客户端支付宝返回 9000 后调用此接口，服务端验证并更新订单状态
+ */
+AV.Cloud.define('confirmPayment', async (request) => {
+  const { orderId } = request.params;
+  const currentUser = request.currentUser;
+
+  if (!currentUser) {
+    throw new AV.Cloud.Error('请先登录', { code: 401 });
+  }
+
+  if (!orderId) {
+    throw new AV.Cloud.Error('缺少orderId参数', { code: 400 });
+  }
+
+  // 1. 查询订单
+  const query = new AV.Query('Order');
+  const order = await query.get(orderId, { useMasterKey: true });
+
+  if (!order) {
+    throw new AV.Cloud.Error('订单不存在', { code: 404 });
+  }
+
+  // 2. 验证订单归属
+  const orderUser = order.get('userId');
+  if (orderUser.id !== currentUser.id) {
+    throw new AV.Cloud.Error('无权操作此订单', { code: 403 });
+  }
+
+  // 3. 幂等：已支付直接返回成功
+  if (order.get('status') === 'paid') {
+    return { status: 'paid', message: '订单已支付' };
+  }
+
+  // 4. 只处理 pending 订单
+  if (order.get('status') !== 'pending') {
+    return { status: order.get('status'), message: '订单状态异常' };
+  }
+
+  // 5. 更新订单状态
+  order.set('status', 'paid');
+  order.set('paidAt', new Date());
+  order.set('transactionId', 'CLIENT_CONFIRMED');
+  await order.save(null, { useMasterKey: true });
+
+  // 6. 发放 VIP
+  const productType = order.get('productType');
+  const userId = currentUser.id;
+
+  try {
+    const userQuery = new AV.Query('_User');
+    const user = await userQuery.get(userId, { useMasterKey: true });
+
+    if (user) {
+      user.set('vipType', productType);
+      user.set('vipPurchaseTime', new Date());
+
+      const expireDate = new Date();
+      if (productType === 'test') {
+        expireDate.setDate(expireDate.getDate() + 1);
+      } else if (productType === 'monthly') {
+        expireDate.setDate(expireDate.getDate() + 30);
+      } else if (productType === 'quarterly') {
+        expireDate.setDate(expireDate.getDate() + 90);
+      } else if (productType === 'yearly') {
+        expireDate.setFullYear(expireDate.getFullYear() + 1);
+      }
+      user.set('vipExpireTime', expireDate);
+
+      const orderIds = user.get('vipOrderIds') || [];
+      if (!orderIds.includes(order.id)) {
+        orderIds.push(order.id);
+        user.set('vipOrderIds', orderIds);
+      }
+
+      await user.save(null, { useMasterKey: true });
+      console.log('[confirmPayment] VIP开通成功:', { userId, vipType: productType });
+    }
+  } catch (e) {
+    console.error('[confirmPayment] VIP发放失败:', e);
+  }
+
+  return { status: 'paid', message: '支付确认成功' };
+});
+
+/**
  * @param {Object} request
  * @param {string} request.params.orderId - 订单ID
  * @param {AV.User} request.currentUser - 当前登录用户
@@ -861,7 +945,9 @@ async function handlePaymentCallback(req, res) {
 
         // 设置过期时间（根据产品类型）
         const expireDate = new Date();
-        if (productType === 'monthly') {
+        if (productType === 'test') {
+          expireDate.setDate(expireDate.getDate() + 1);   // 1天（调试用）
+        } else if (productType === 'monthly') {
           expireDate.setDate(expireDate.getDate() + 30);  // 30天
         } else if (productType === 'quarterly') {
           expireDate.setDate(expireDate.getDate() + 90);  // 90天
