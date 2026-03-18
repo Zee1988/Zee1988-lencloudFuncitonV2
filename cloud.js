@@ -928,7 +928,9 @@ async function handlePaymentCallback(req, res) {
 
         // 设置过期时间（根据产品类型）
         const expireDate = new Date();
-        if (productType === 'monthly') {
+        if (productType === 'test') {
+          expireDate.setDate(expireDate.getDate() + 1);   // 1天
+        } else if (productType === 'monthly') {
           expireDate.setDate(expireDate.getDate() + 30);  // 30天
         } else if (productType === 'quarterly') {
           expireDate.setDate(expireDate.getDate() + 90);  // 90天
