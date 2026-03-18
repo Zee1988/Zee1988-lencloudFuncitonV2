@@ -846,13 +846,17 @@ async function handlePaymentCallback(req, res) {
       return res.send('SUCCESS');
     }
 
-    // 1. 签名校验（云勾回调签名规则可能与下单不同，仅记录不拦截，依靠订单匹配+金额校验保证安全）
-    const calcSign = calculateSign(req.body || {}, YUNGOU_API_KEY);
+    // 1. 验证签名（云勾回调只对核心字段签名：code/mchId/money/orderNo/outTradeNo/payNo）
+    const { mchId, orderNo } = req.body;
+    const callbackSignParams = { code, mchId, money, orderNo, outTradeNo, payNo };
+    const calcSign = calculateSign(callbackSignParams, YUNGOU_API_KEY);
+
     if (sign !== calcSign) {
-      console.warn('[handlePaymentCallback] 签名不一致（不拦截，继续处理）:', { sign, calcSign });
-    } else {
-      console.log('[handlePaymentCallback] 签名验证成功');
+      console.error('[handlePaymentCallback] 签名验证失败:', { sign, calcSign });
+      return res.send('FAIL');
     }
+
+    console.log('[handlePaymentCallback] 签名验证成功');
 
     // 2. 解析附加数据
     let attachData = {};
